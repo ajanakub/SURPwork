@@ -1,0 +1,105 @@
+## Bukola Ajanaku
+## July 20, 2021
+## Probing new data to confirm pipeline for newFinalPlay
+## one screen 3 under probeNewData
+## module load udunits proj gdal geos
+## module load R/4.0.2
+## R
+
+.libPaths(c("/hpc/users/ajanab01/.Rlib", .libPaths()))
+
+suppressPackageStartupMessages(library(knitr))
+suppressPackageStartupMessages(library(decorate))
+suppressPackageStartupMessages(library(GenomicRanges))
+suppressPackageStartupMessages(library(limma))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(doParallel))
+suppressPackageStartupMessages(library(BiocParallel))
+suppressPackageStartupMessages(library(cowplot))
+suppressPackageStartupMessages(library(qvalue))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(edgeR))
+
+options(xtable.type="html")
+
+knitr::opts_chunk$set(
+  echo=TRUE,
+  warning=FALSE,
+  message=TRUE,
+  error = FALSE,
+  tidy = FALSE,
+  cache = TRUE,
+  cache.lazy = FALSE,
+  dev = c("png", "pdf"),
+  fig.width=7, fig.height=7)
+
+options(markdown.HTML.stylesheet = 'css/custom.css')
+
+register(SnowParam(4, "SOCK", progressbar=TRUE))
+
+load("/sc/arion/projects/epigenAD/Bukola/ATAC_SCZ/Processed.RDATA")
+
+featureLocation = peakLocs
+metadata = metaData
+response = chipCounts
+
+## Processing Data section: think residuals
+
+## Determines whether each methylation marker (aka the rows) are expressed using
+## the summation of the samples (B98T1 and etc.) with a 20% benchmark.
+isexpr = rowSums(cpm(chipCounts)>1) >= 0.2*ncol(chipCounts)
+peakLocs2 = peakLocs[which(isexpr)]
+
+## cleans data by by making model matrix and residualizing the data
+countObj = DGEList( chipCounts[isexpr,] )
+countObj = calcNormFactors( countObj )
+dcmp = svd(vobj$E, nv=5, nu=0)
+design = model.matrix( ~ dcmp$v[,1:2] + as.character(`ATACSeq_report:Sequencing_Order_ID`) +
+  `ATACSeq_report:Mean_GC_content`+
+  `ATACSeq_report:Mapped_Reads` +
+  `Age of Death` +
+  `PMI (in hours)` + Sex + Dx, metaData)
+vobj2 = voom(countObj, design, plot=FALSE)
+fit = lmFit( vobj2, design)
+fit = eBayes(fit)
+residValues = residuals(fit, vobj2)
+topTable(fit, coef='DxSCZ')
+
+## Time for adjacent hierarchical clustering. NOTE: This uses only control dx data
+## same thing with my code. Will this mess with my clustering idea. What if there is
+## a difference between diseases at this stage for clustering. Shouldn't I include everything.
+treeList = runOrderedClusteringGenome(residValues[,metaData$Dx=='Control'], peakLocs2, quiet=FALSE )
+
+## creating clusters with our target mean clst sizes.
+treeListClusters = createClusters(treeList, method='meanClusterSize', meanClusterSize=c(10, 25, 50, 100) )
+n_clusters = countClusters( treeListClusters )
+
+# score each cluster to only retain clusters with strong correlation structure
+clstScore = scoreClusters(treeList, treeListClusters_filter)
+
+# retain clusters based on filterign criteria
+# If lead eigen value fraction (LEF) > 40% then ke/ep clusters
+# LEF is the fraction of variance explained by the first eigen-value
+clustInclude = retainClusters( clstScore, "LEF", 0.1 )
+
+# get retained clusters
+treeListClusters_filter = filterClusters( treeListClusters, clustInclude )
+
+# Collapse similar clusters
+treeListClusters_collapse = collapseClusters( treeListClusters_filter, featureLocation )
+
+# get total number of clusters
+n_clusters = countClusters( treeListClusters_collapse )
+
+# Evaluate Differential Correlation between two subsets of data
+param = SnowParam(6, "SOCK", progressbar=TRUE)
+
+ecdBox = evalDiffCorr(residValues, metaData$Dx, peakLocs2, treeListClusters_collapse, BPPARAM=param, method="Box.permute" )
+
+df = summary( ecdBox )
+
+# print results
+head(df)
+df_results = combineResults( ecdBox, clstScore, treeListClusters, featureLocation)
+
+sum(clstScore[["25"]]$N == 1)

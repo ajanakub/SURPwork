@@ -1,0 +1,88 @@
+## Bukola Ajanaku
+## July 12, 2021
+## DNAMethControl.R
+## on screen 3 as DNAMethCon
+## module load udunits proj gdal geos
+## module load R/4.0.2
+## R
+## save(list = ls(), file = "/sc/arion/work/ajanab01/newFinalPlayData.RDATA")
+
+.libPaths(c("/hpc/users/ajanab01/.Rlib", .libPaths()))
+
+suppressPackageStartupMessages(library(knitr))
+suppressPackageStartupMessages(library(decorate))
+suppressPackageStartupMessages(library(GenomicRanges))
+suppressPackageStartupMessages(library(limma))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(doParallel))
+suppressPackageStartupMessages(library(BiocParallel))
+suppressPackageStartupMessages(library(cowplot))
+suppressPackageStartupMessages(library(qvalue))
+suppressPackageStartupMessages(library(dplyr))
+
+options(xtable.type="html")
+
+knitr::opts_chunk$set(
+  echo=TRUE,
+  warning=FALSE,
+  message=TRUE,
+  error = FALSE,
+  tidy = FALSE,
+  cache = TRUE,
+  cache.lazy = FALSE,
+  dev = c("png", "pdf"),
+  fig.width=7, fig.height=7)
+
+options(markdown.HTML.stylesheet = 'css/custom.css')
+
+register(SnowParam(4, "SOCK", progressbar=TRUE))
+
+library(EnsDb.Hsapiens.v75)
+
+ensdb=EnsDb.Hsapiens.v75
+
+# loading data
+response = readRDS("/sc/arion/projects/epigenAD/Bukola/DNA_methylation/response.RDS" )
+metadata = readRDS("/sc/arion/projects/epigenAD/Bukola/DNA_methylation/metadata.RDS")
+featureLocation = readRDS("/sc/arion/projects/epigenAD/Bukola/DNA_methylation/featureLocation.RDS")
+
+# creates factors for the target conditions
+metadata$Dx = factor(metadata$Dx, c("Control", "Schizo"))
+
+# making sure each feature has a width of at least two
+end(featureLocation) = end(featureLocation) + 1
+
+# Calculating residuals (become residValues):
+design = model.matrix(~ Dx + Age + Race + negControl_PC1 + negControl_PC2 +
+  negControl_PC3 + negControl_PC4, metadata)
+
+# Getting cleaned (residualed) data
+fit = lmFit(response, design)
+fit = eBayes(fit)
+residValues = residuals( fit, response)
+
+# compact function used to produce treeList, lusters, and clstScore
+# treeList = clusters peaks for methylation markers of CRDs for ONLY the features
+#            that are adjacent to one another (adjacent hierarchical clustering)
+# lusters = actually makes different clusters of genes based on the
+#            mean clusters sizes we choose (for this script: 10, 25, 50, 100)
+# clstScore = Will score clusters based on their correlation in the structure.
+#             IMPORTANT because this gives the MAC and LEF scores.
+call_clusters_collapse = function(input_mat, peaksGR, meanCluster_Size){
+  treeList = runOrderedClusteringGenome(input_mat, peaksGR)
+  names(peaksGR)=peaksGR$names
+
+  treeListClusters = createClusters(treeList, method = "meanClusterSize",
+    meanClusterSize = meanCluster_Size)
+
+  clstScore = scoreClusters(treeList, treeListClusters)
+
+  return(list(treeList, treeListClusters, clstScore))
+}
+
+peaks = as.data.frame(featureLocation)
+peaks$PeaksID = rownames(peaks)
+peaks$names = peaks$PeakIDs
+peaks_GR = as(peaks, "GRanges")
+
+clstSizer = c(100, 125, 150, 200, 250, 300)
